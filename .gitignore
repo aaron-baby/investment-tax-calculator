@@ -1,0 +1,29 @@
+# Virtual environment
+venv/
+.venv/
+
+# Environment variables (contains API secrets)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Data files (generated)
+data/
+output/
