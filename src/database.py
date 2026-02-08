@@ -106,6 +106,34 @@ class DatabaseManager:
             conn.execute("DELETE FROM orders WHERE strftime('%Y', executed_at) = ?", (str(year),))
             conn.execute("DELETE FROM exchange_rates WHERE strftime('%Y', date) = ?", (str(year),))
 
+    def update_order_fees(self, order_id: str, fees: Dict):
+        """Update only the fees_json field for an existing order."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE orders SET fees_json = ? WHERE order_id = ?",
+                (json.dumps(fees), order_id)
+            )
+
+    def get_orders_missing_fees(self, year: int = None) -> List[Dict]:
+        """Get orders that have no fee data yet.
+
+        Returns order_id list for orders where fees_json is null, empty, or '{}'.
+        """
+        query = '''
+            SELECT order_id, symbol FROM orders
+            WHERE (fees_json IS NULL OR fees_json = '' OR fees_json = '{}')
+        '''
+        params = []
+        if year:
+            query += " AND strftime('%Y', executed_at) = ?"
+            params.append(str(year))
+        query += " ORDER BY executed_at"
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
     @staticmethod
     def _row_to_order(row: sqlite3.Row) -> Dict:
         """Convert a database row to an order dict."""

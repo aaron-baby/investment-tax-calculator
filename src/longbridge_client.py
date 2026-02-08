@@ -135,3 +135,36 @@ class LongBridgeClient:
         except Exception as e:
             print(f"✗ Connection failed: {e}")
             return False
+    def fetch_order_detail(self, order_id: str) -> Optional[Dict]:
+        """Fetch charge_detail for a single order via order detail API.
+
+        Returns:
+            Dict with 'total_amount' and 'currency', or None on failure.
+        """
+        try:
+            detail = self.ctx.order_detail(order_id=order_id)
+            charge = getattr(detail, 'charge_detail', None)
+            if not charge:
+                return None
+
+            total = getattr(charge, 'total_amount', '0')
+            currency = getattr(charge, 'currency', '')
+            items = []
+
+            for item in getattr(charge, 'items', []):
+                for fee in getattr(item, 'fees', []):
+                    items.append({
+                        'code': getattr(fee, 'code', ''),
+                        'name': getattr(fee, 'name', ''),
+                        'amount': getattr(fee, 'amount', '0'),
+                        'currency': getattr(fee, 'currency', ''),
+                    })
+
+            return {
+                'total_amount': str(total),
+                'currency': str(currency),
+                'items': items,
+            }
+        except Exception as e:
+            print(f"  Error fetching detail for {order_id}: {e}")
+            return None

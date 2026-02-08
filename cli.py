@@ -3,6 +3,7 @@
 
 import sys
 import sqlite3
+import time
 import click
 from datetime import datetime
 
@@ -131,6 +132,51 @@ def calculate(year, export):
 
     if export:
         calc.export_csv(results, Config.OUTPUT_DIR)
+
+@cli.command()
+@click.option('--year', type=int, default=None, help='Only update fees for orders in this year')
+def update_fees(year):
+    """Fetch and store commission fees for orders via order detail API.
+
+    This is a separate step from import-data. Run it after importing orders.
+    Only fetches fees for orders that don't have fee data yet.
+    """
+    try:
+        Config.validate()
+    except ValueError as e:
+        click.echo(f"❌ {e}")
+        sys.exit(1)
+
+    db = DatabaseManager(Config.DATABASE_PATH)
+    missing = db.get_orders_missing_fees(year)
+
+    if not missing:
+        click.echo("✅ All orders already have fee data.")
+        return
+
+    click.echo(f"🔄 Fetching fees for {len(missing)} orders...")
+
+    client = LongBridgeClient(
+        Config.LONGBRIDGE_APP_KEY,
+        Config.LONGBRIDGE_APP_SECRET,
+        Config.LONGBRIDGE_ACCESS_TOKEN
+    )
+
+    updated = 0
+    for i, order in enumerate(missing):
+        if i > 0 and i % 10 == 0:
+            click.echo(f"  Progress: {i}/{len(missing)}")
+
+        fees = client.fetch_order_detail(order['order_id'])
+        if fees:
+            db.update_order_fees(order['order_id'], fees)
+            updated += 1
+
+        time.sleep(0.3)  # rate limit
+
+    click.echo(f"✅ Updated fees for {updated}/{len(missing)} orders")
+
+
 
 
 @cli.command()
