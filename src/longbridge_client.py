@@ -147,17 +147,17 @@ class LongBridgeClient:
             if not charge:
                 return None
 
-            total = getattr(charge, 'total_amount', '0')
-            currency = getattr(charge, 'currency', '')
+            total = str(getattr(charge, 'total_amount', '0'))
+            currency = str(getattr(charge, 'currency', ''))
             items = []
 
             for item in getattr(charge, 'items', []):
                 for fee in getattr(item, 'fees', []):
                     items.append({
-                        'code': getattr(fee, 'code', ''),
-                        'name': getattr(fee, 'name', ''),
-                        'amount': getattr(fee, 'amount', '0'),
-                        'currency': getattr(fee, 'currency', ''),
+                        'code': str(getattr(fee, 'code', '')),
+                        'name': str(getattr(fee, 'name', '')),
+                        'amount': str(getattr(fee, 'amount', '0')),
+                        'currency': str(getattr(fee, 'currency', '')),
                     })
 
             return {
