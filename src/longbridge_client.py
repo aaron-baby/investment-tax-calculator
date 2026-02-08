@@ -73,7 +73,7 @@ class LongBridgeClient:
                 if last_done:
                     try:
                         price = float(last_done)
-                    except:
+                    except (ValueError, TypeError):
                         pass
             
             if price <= 0:
@@ -135,6 +135,7 @@ class LongBridgeClient:
         except Exception as e:
             print(f"✗ Connection failed: {e}")
             return False
+
     def fetch_order_detail(self, order_id: str) -> Optional[Dict]:
         """Fetch charge_detail for a single order via order detail API.
 

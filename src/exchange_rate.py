@@ -59,7 +59,7 @@ class ExchangeRateManager:
                 data = resp.json()
                 if 'rates' in data and to_currency in data['rates']:
                     return data['rates'][to_currency]
-        except:
+        except Exception:
             pass
         
         # For CNY, use calculated rates (most free APIs don't support CNY well)

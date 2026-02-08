@@ -1,12 +1,27 @@
 """Settlement calculator — converts raw trades to reporting currency amounts.
 
-Encapsulates exchange rate conversion and fee handling.
+Encapsulates exchange rate conversion, fee handling, and contract multipliers.
 Single responsibility: translate a trade into CNY net amounts.
 """
 
+import re
 from datetime import datetime
 from typing import Dict
 from .exchange_rate import ExchangeRateManager
+
+# US equity options: TICKER + YYMMDD + C/P + strike price + .US
+_OPTION_PATTERN = re.compile(r'^.+\d{6}[CP]\d+\.US$')
+
+
+def get_multiplier(symbol: str) -> int:
+    """Return the contract multiplier for a symbol.
+
+    US equity options: 1 contract = 100 shares → multiplier = 100
+    Everything else (stocks, ETFs, HK stocks): multiplier = 1
+    """
+    if _OPTION_PATTERN.match(symbol):
+        return 100
+    return 1
 
 
 class SettlementCalculator:
@@ -18,28 +33,34 @@ class SettlementCalculator:
     def settle_buy(self, order: Dict) -> float:
         """Calculate total buy cost in CNY.
 
-        Formula: (quantity * price + fees) * exchange_rate
-
-        Returns:
-            Total cost in CNY including fees.
+        Formula: (quantity * price * multiplier + fees) * exchange_rate
         """
         rate = self._get_rate(order)
-        gross = order['quantity'] * order['price']
+        gross = self._gross(order)
         fees = self._extract_fees(order)
         return (gross + fees) * rate
 
     def settle_sell_with_rate(self, order: Dict) -> tuple[float, float]:
         """Calculate total sell proceeds in CNY and return the rate used.
 
-        Formula: (quantity * price - fees) * exchange_rate
+        Formula: (quantity * price * multiplier - fees) * exchange_rate
 
         Returns:
             (proceeds_cny, exchange_rate)
         """
         rate = self._get_rate(order)
-        gross = order['quantity'] * order['price']
+        gross = self._gross(order)
         fees = self._extract_fees(order)
         return (gross - fees) * rate, rate
+
+    def get_rate_for_order(self, order: Dict) -> float:
+        """Get the exchange rate for an order (public, for reporting)."""
+        return self._get_rate(order)
+
+    @staticmethod
+    def _gross(order: Dict) -> float:
+        """Calculate gross trade value in original currency."""
+        return order['quantity'] * order['price'] * get_multiplier(order['symbol'])
 
     def _get_rate(self, order: Dict) -> float:
         """Get exchange rate for the order's execution date."""

@@ -236,15 +236,25 @@ def db(table, limit, year):
             click.echo("\n📋 ORDERS")
             click.echo("-" * 90)
 
-            query = f"""
-                SELECT order_id, symbol, side, quantity, price, currency, 
-                       substr(executed_at, 1, 10) as date
-                FROM orders 
-                {'WHERE strftime("%Y", executed_at) = "' + str(year) + '"' if year else ''}
-                ORDER BY executed_at DESC
-                LIMIT {limit}
-            """
-            rows = conn.execute(query).fetchall()
+            if year:
+                query = """
+                    SELECT order_id, symbol, side, quantity, price, currency,
+                           substr(executed_at, 1, 10) as date
+                    FROM orders
+                    WHERE strftime('%Y', executed_at) = ?
+                    ORDER BY executed_at DESC
+                    LIMIT ?
+                """
+                rows = conn.execute(query, (str(year), limit)).fetchall()
+            else:
+                query = """
+                    SELECT order_id, symbol, side, quantity, price, currency,
+                           substr(executed_at, 1, 10) as date
+                    FROM orders
+                    ORDER BY executed_at DESC
+                    LIMIT ?
+                """
+                rows = conn.execute(query, (limit,)).fetchall()
 
             if rows:
                 click.echo(f"{'Order ID':<22} {'Symbol':<12} {'Side':<6} {'Qty':<10} {'Price':<12} {'Curr':<6} {'Date'}")
@@ -261,10 +271,10 @@ def db(table, limit, year):
             click.echo("\n💱 EXCHANGE RATES")
             click.echo("-" * 50)
 
-            rows = conn.execute(f"""
+            rows = conn.execute("""
                 SELECT date, from_currency, to_currency, rate
-                FROM exchange_rates ORDER BY date DESC LIMIT {limit}
-            """).fetchall()
+                FROM exchange_rates ORDER BY date DESC LIMIT ?
+            """, (limit,)).fetchall()
 
             if rows:
                 click.echo(f"{'Date':<12} {'From':<6} {'To':<6} {'Rate'}")

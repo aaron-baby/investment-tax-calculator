@@ -55,36 +55,42 @@ class TaxCalculator:
         total_losses = 0
 
         for order in orders:
+            in_year = self._in_year(order, year)
+
             if order['side'] == 'BUY':
                 settled_cost = self.settlement.settle_buy(order)
-                pool.buy(order['quantity'], settled_cost)
+                cost_basis = pool.buy(order['quantity'], settled_cost)
 
-            elif order['side'] == 'SELL':
-                cost_basis = pool.sell(order['quantity'])
-
-                # Only record sells in the target year
-                if self._in_year(order, year):
-                    proceeds, rate = self.settlement.settle_sell_with_rate(order)
-                    gain_loss = proceeds - cost_basis
-                    tx = {
-                        'order_id': order['order_id'],
-                        'symbol': symbol,
-                        'date': self._parse_date(order['executed_at']),
-                        'quantity': order['quantity'],
-                        'price': order['price'],
-                        'currency': order['currency'],
-                        'rate': rate,
-                        'proceeds_cny': proceeds,
-                        'cost_basis_cny': cost_basis,
-                        'gain_loss': gain_loss,
-                        'tax': max(0, gain_loss) * self.tax_rate,
-                    }
+                # cost_basis > 0 means closing a short position (buy-to-close)
+                if cost_basis > 0 and in_year:
+                    # For short close: proceeds were locked in at open, cost is what we pay now
+                    proceeds_cny = cost_basis   # the proceeds received when opening short
+                    cost_cny = settled_cost      # what we pay to close
+                    gain_loss = proceeds_cny - cost_cny
+                    rate = self.settlement.get_rate_for_order(order)
+                    tx = self._build_tx(order, rate, proceeds_cny, cost_cny, gain_loss)
                     transactions.append(tx)
-
                     if gain_loss > 0:
                         total_gains += gain_loss
                     else:
                         total_losses += abs(gain_loss)
+
+            elif order['side'] == 'SELL':
+                # Need settled_amount for potential sell-to-open
+                proceeds_cny, rate = self.settlement.settle_sell_with_rate(order)
+                cost_basis = pool.sell(order['quantity'], settled_amount=proceeds_cny)
+
+                # cost_basis > 0 means closing a long position
+                if cost_basis > 0 and in_year:
+                    gain_loss = proceeds_cny - cost_basis
+                    tx = self._build_tx(order, rate, proceeds_cny, cost_basis, gain_loss)
+                    transactions.append(tx)
+                    if gain_loss > 0:
+                        total_gains += gain_loss
+                    else:
+                        total_losses += abs(gain_loss)
+
+                # cost_basis == 0 means sell-to-open (short), no taxable event yet
 
         return {
             'transactions': transactions,
@@ -141,6 +147,23 @@ class TaxCalculator:
             'details': [],
             'summary': {},
         }
+
+    def _build_tx(self, order: Dict, rate: float, proceeds_cny: float,
+                  cost_basis_cny: float, gain_loss: float) -> Dict:
+        return {
+            'order_id': order['order_id'],
+            'symbol': order['symbol'],
+            'date': self._parse_date(order['executed_at']),
+            'quantity': order['quantity'],
+            'price': order['price'],
+            'currency': order['currency'],
+            'rate': rate,
+            'proceeds_cny': proceeds_cny,
+            'cost_basis_cny': cost_basis_cny,
+            'gain_loss': gain_loss,
+            'tax': max(0, gain_loss) * self.tax_rate,
+        }
+
 
     @staticmethod
     def _in_year(order: Dict, year: int) -> bool:
