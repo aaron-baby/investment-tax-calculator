@@ -16,49 +16,46 @@ class LongBridgeClient:
         )
         self.ctx = TradeContext(self.config)
     
-    def fetch_orders(self, year: int) -> List[Dict]:
+    def fetch_orders(self, start: datetime, end: datetime) -> List[Dict]:
         """
-        Fetch historical filled orders for a specific year.
+        Fetch historical filled orders for a date range.
         Handles 90-day API limit by chunking requests.
         """
-        print(f"Fetching orders for year {year}...")
-        
+        print(f"Fetching orders from {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}...")
+
         orders = []
-        start = datetime(year, 1, 1)
-        end = datetime(year, 12, 31, 23, 59, 59)
-        
         chunk_start = start
         chunk_num = 1
-        
+
         while chunk_start < end:
             chunk_end = min(chunk_start + timedelta(days=89), end)
-            
+
             print(f"  Chunk {chunk_num}: {chunk_start.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')}")
-            
+
             try:
                 result = self.ctx.history_orders(
                     status=[OrderStatus.Filled],
                     start_at=chunk_start,
                     end_at=chunk_end
                 )
-                
+
                 count = len(result) if result else 0
                 print(f"    Found {count} orders")
-                
+
                 if result:
                     for order in result:
                         parsed = self._parse_order(order)
                         if parsed:
                             orders.append(parsed)
-                
+
             except Exception as e:
                 print(f"    Error: {e}")
-            
+
             chunk_start = chunk_end + timedelta(days=1)
             chunk_num += 1
             time.sleep(0.5)
-        
-        print(f"Total: {len(orders)} orders for {year}")
+
+        print(f"Total: {len(orders)} orders fetched")
         return orders
     
     def _parse_order(self, order) -> Optional[Dict]:
