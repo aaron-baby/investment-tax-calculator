@@ -9,11 +9,13 @@ class LongBridgeClient:
     """Client for Long Bridge OpenAPI (read-only operations)."""
     
     def __init__(self, app_key: str, app_secret: str, access_token: str):
-        self.config = LongportConfig(
-            app_key=app_key,
-            app_secret=app_secret,
-            access_token=access_token
-        )
+        import os
+        # Populate LONGPORT_* env vars so Config.from_env() picks them up,
+        # along with LONGPORT_REGION if set (e.g. "cn" for China endpoint).
+        os.environ.setdefault('LONGPORT_APP_KEY', app_key)
+        os.environ.setdefault('LONGPORT_APP_SECRET', app_secret)
+        os.environ.setdefault('LONGPORT_ACCESS_TOKEN', access_token)
+        self.config = LongportConfig.from_env()
         self.ctx = TradeContext(self.config)
     
     def fetch_orders(self, start: datetime, end: datetime) -> List[Dict]:
