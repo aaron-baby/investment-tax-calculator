@@ -13,6 +13,8 @@ from src.exchange_rate import ExchangeRateManager
 from src.longbridge_client import LongBridgeClient
 from src.settlement import SettlementCalculator
 from src.calculator import TaxCalculator
+from src.dividend import DividendCalculator
+from src.cashflow_parser import parse_dividends, summarize_by_symbol
 
 # Initialize directories
 Config.init_dirs()
@@ -125,36 +127,58 @@ def calculate(year, export):
 
     results = calc.calculate(year)
 
-    if not results['details']:
-        click.echo(f"⚠️  No taxable transactions for {year}")
+    # Calculate dividend tax
+    div_calc = DividendCalculator(db, exchange)
+    div_results = div_calc.calculate(year)
+
+    if not results['details'] and not div_results['details']:
+        click.echo(f"⚠️  No taxable transactions or dividends for {year}")
         return
 
-    # Display results
+    # Display capital gains results
     click.echo(f"\n{'='*60}")
     click.echo(f"TAX CALCULATION SUMMARY FOR {year}")
     click.echo(f"{'='*60}")
-    click.echo(f"Total Gains:   ¥{results['total_gains']:>12,.2f}")
-    click.echo(f"Total Losses:  ¥{results['total_losses']:>12,.2f}")
-    click.echo(f"Net Gains:     ¥{results['net_gains']:>12,.2f}")
-    click.echo(f"Tax Rate:      {Config.CAPITAL_GAINS_TAX_RATE*100:>12.0f}%")
-    click.echo(f"Tax Owed:      ¥{results['total_tax']:>12,.2f}")
 
-    click.echo(f"\nBy Symbol:")
-    click.echo("-" * 60)
-    for symbol, s in results['summary'].items():
-        net = s['gains'] - s['losses']
-        click.echo(
-            f"  {symbol:<12} Gains: ¥{s['gains']:>10,.2f}  "
-            f"Losses: ¥{s['losses']:>10,.2f}  Net: ¥{net:>10,.2f}"
-        )
-        if s['remaining_qty'] > 0:
+    if results['details']:
+        click.echo(f"\n📈 CAPITAL GAINS")
+        click.echo(f"Total Gains:   ¥{results['total_gains']:>12,.2f}")
+        click.echo(f"Total Losses:  ¥{results['total_losses']:>12,.2f}")
+        click.echo(f"Net Gains:     ¥{results['net_gains']:>12,.2f}")
+        click.echo(f"Tax Rate:      {Config.CAPITAL_GAINS_TAX_RATE*100:>12.0f}%")
+        click.echo(f"Tax Owed:      ¥{results['total_tax']:>12,.2f}")
+
+        click.echo(f"\nBy Symbol:")
+        click.echo("-" * 60)
+        for symbol, s in results['summary'].items():
+            net = s['gains'] - s['losses']
             click.echo(
-                f"  {'':12} Remaining: {s['remaining_qty']:.0f} shares, "
-                f"Cost: ¥{s['remaining_cost']:,.2f}"
+                f"  {symbol:<12} Gains: ¥{s['gains']:>10,.2f}  "
+                f"Losses: ¥{s['losses']:>10,.2f}  Net: ¥{net:>10,.2f}"
             )
+            if s['remaining_qty'] > 0:
+                click.echo(
+                    f"  {'':12} Remaining: {s['remaining_qty']:.0f} shares, "
+                    f"Cost: ¥{s['remaining_cost']:,.2f}"
+                )
+
+    # Display dividend results
+    if div_results['details']:
+        click.echo(f"\n💰 DIVIDEND INCOME")
+        click.echo(f"Gross Income:  ¥{div_results['total_gross_cny']:>12,.2f}")
+        click.echo(f"Withheld:      ¥{div_results['total_withheld_cny']:>12,.2f}")
+        click.echo(f"China Tax:     ¥{div_results['total_china_tax']:>12,.2f}")
+        click.echo(f"Credit:        ¥{div_results['total_credit']:>12,.2f}")
+        click.echo(f"Tax Owed:      ¥{div_results['total_tax_owed']:>12,.2f}")
+
+    # Overall
+    total_tax = results['total_tax'] + div_results['total_tax_owed']
+    click.echo(f"\n{'='*60}")
+    click.echo(f"TOTAL TAX OWED: ¥{total_tax:>12,.2f}")
+    click.echo(f"{'='*60}")
 
     if export:
-        calc.export_csv(results, Config.OUTPUT_DIR)
+        calc.export_csv(results, Config.OUTPUT_DIR, div_results)
 
 @cli.command()
 @click.option('--year', type=int, default=None, help='Only update fees for orders in this year')
@@ -200,6 +224,78 @@ def update_fees(year):
     click.echo(f"✅ Updated fees for {updated}/{len(missing)} orders")
 
 
+
+
+@cli.command()
+@click.option('--year', type=int, default=Config.DEFAULT_TAX_YEAR, help='Tax year')
+@click.option('--since', type=str, default=None,
+              help='Import from this date (YYYY-MM-DD). Use for first-time setup.')
+def import_dividends(year, since):
+    """Import dividend cash flow data from Long Bridge API.
+
+    Fetches cash flow entries and filters for dividend-related inflows.
+    Dividend entries are identified by transaction_flow_name keywords.
+
+    First-time:  python cli.py import-dividends --year 2025 --since 2020-01-01
+    Incremental: python cli.py import-dividends --year 2025
+    """
+    try:
+        Config.validate()
+    except ValueError as e:
+        click.echo(f"❌ {e}")
+        sys.exit(1)
+
+    db = DatabaseManager(Config.DATABASE_PATH)
+    exchange = ExchangeRateManager(db)
+
+    if since:
+        start = datetime.strptime(since, '%Y-%m-%d')
+    else:
+        start = datetime(year, 1, 1)
+    end = datetime(year, 12, 31, 23, 59, 59)
+
+    client = LongBridgeClient(
+        Config.LONGBRIDGE_APP_KEY,
+        Config.LONGBRIDGE_APP_SECRET,
+        Config.LONGBRIDGE_ACCESS_TOKEN
+    )
+
+    if not client.test_connection():
+        sys.exit(1)
+
+    entries = client.fetch_cashflow(start, end)
+
+    dividends, unmatched = parse_dividends(entries)
+
+    if not dividends:
+        click.echo("⚠️  No dividend entries found in cash flow data")
+        if entries:
+            flow_names = sorted(set(e['transaction_flow_name'] for e in entries))
+            click.echo(f"   All flow names found: {', '.join(flow_names)}")
+        return
+
+    db.save_dividends(dividends)
+    click.echo(f"✅ Imported {len(dividends)} dividend records")
+
+    total_wh = sum(d['withholding'] for d in dividends)
+    if total_wh > 0:
+        click.echo(f"   Withholding tax matched: {total_wh:.2f}")
+    if unmatched:
+        click.echo(f"   ⚠️  {len(unmatched)} withholding entries could not be matched")
+
+    for sym, total in sorted(summarize_by_symbol(dividends).items()):
+        click.echo(f"   {sym}: {total:.2f} (net)")
+
+    # Fetch exchange rates for dividend dates
+    dates = list(set(
+        datetime.fromisoformat(d['received_at']).strftime('%Y-%m-%d')
+        for d in dividends
+    ))
+    currencies = list(set(d['currency'] for d in dividends if d['currency'] != 'CNY'))
+    for currency in currencies:
+        exchange.batch_fetch(dates, currency, 'CNY')
+
+    click.echo("✅ Dividend import completed!")
 
 
 @cli.command()

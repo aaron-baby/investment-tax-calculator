@@ -1,15 +1,25 @@
 """Long Bridge API client for fetching trading data (READ-ONLY)."""
 
-from longport.openapi import TradeContext, Config as LongportConfig, OrderStatus
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+import os
 import time
+from datetime import datetime, timedelta
+from typing import Callable, Dict, List, Optional
+
+from longport.openapi import (
+    BalanceType,
+    Config as LongportConfig,
+    OrderStatus,
+    TradeContext,
+)
+
+# Long Bridge API enforces a ~90-day window per request.
+_CHUNK_DAYS = 89
+
 
 class LongBridgeClient:
     """Client for Long Bridge OpenAPI (read-only operations)."""
-    
+
     def __init__(self, app_key: str, app_secret: str, access_token: str):
-        import os
         # Populate LONGPORT_* env vars so Config.from_env() picks them up,
         # along with LONGPORT_REGION if set (e.g. "cn" for China endpoint).
         os.environ.setdefault('LONGPORT_APP_KEY', app_key)
@@ -17,48 +27,63 @@ class LongBridgeClient:
         os.environ.setdefault('LONGPORT_ACCESS_TOKEN', access_token)
         self.config = LongportConfig.from_env()
         self.ctx = TradeContext(self.config)
-    
-    def fetch_orders(self, start: datetime, end: datetime) -> List[Dict]:
-        """
-        Fetch historical filled orders for a date range.
-        Handles 90-day API limit by chunking requests.
-        """
-        print(f"Fetching orders from {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}...")
 
-        orders = []
+    # -- chunked fetch helper ------------------------------------------------
+
+    @staticmethod
+    def _chunked_fetch(start: datetime, end: datetime,
+                       fetch_fn: Callable[[datetime, datetime], List],
+                       label: str = 'items',
+                       delay: float = 0.5) -> List:
+        """Split a date range into 90-day chunks and collect results.
+
+        Args:
+            fetch_fn: Called with (chunk_start, chunk_end), returns a list.
+            label: Name shown in progress logs.
+            delay: Seconds to sleep between chunks.
+        """
+        print(f"Fetching {label} from {start.strftime('%Y-%m-%d')} "
+              f"to {end.strftime('%Y-%m-%d')}...")
+
+        all_items: List = []
         chunk_start = start
         chunk_num = 1
 
         while chunk_start < end:
-            chunk_end = min(chunk_start + timedelta(days=89), end)
-
-            print(f"  Chunk {chunk_num}: {chunk_start.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')}")
+            chunk_end = min(chunk_start + timedelta(days=_CHUNK_DAYS), end)
+            print(f"  Chunk {chunk_num}: {chunk_start.strftime('%Y-%m-%d')} "
+                  f"to {chunk_end.strftime('%Y-%m-%d')}")
 
             try:
-                result = self.ctx.history_orders(
-                    status=[OrderStatus.Filled],
-                    start_at=chunk_start,
-                    end_at=chunk_end
-                )
-
-                count = len(result) if result else 0
-                print(f"    Found {count} orders")
-
-                if result:
-                    for order in result:
-                        parsed = self._parse_order(order)
-                        if parsed:
-                            orders.append(parsed)
-
+                items = fetch_fn(chunk_start, chunk_end)
+                print(f"    Found {len(items)} {label}")
+                all_items.extend(items)
             except Exception as e:
                 print(f"    Error: {e}")
 
             chunk_start = chunk_end + timedelta(days=1)
             chunk_num += 1
-            time.sleep(0.5)
+            time.sleep(delay)
 
-        print(f"Total: {len(orders)} orders fetched")
-        return orders
+        print(f"Total: {len(all_items)} {label} fetched")
+        return all_items
+
+    # -- orders --------------------------------------------------------------
+
+    def fetch_orders(self, start: datetime, end: datetime) -> List[Dict]:
+        """Fetch historical filled orders, chunked into 90-day windows."""
+        return self._chunked_fetch(
+            start, end, self._fetch_orders_chunk, label='orders')
+
+    def _fetch_orders_chunk(self, start: datetime, end: datetime) -> List[Dict]:
+        result = self.ctx.history_orders(
+            status=[OrderStatus.Filled],
+            start_at=start,
+            end_at=end,
+        )
+        if not result:
+            return []
+        return [p for p in (self._parse_order(o) for o in result) if p]
     
     def _parse_order(self, order) -> Optional[Dict]:
         """Parse Long Bridge order object to dictionary."""
@@ -171,3 +196,77 @@ class LongBridgeClient:
         except Exception as e:
             print(f"  Error fetching detail for {order_id}: {e}")
             return None
+
+
+    def fetch_cashflow(self, start: datetime, end: datetime,
+                       business_type: Optional[BalanceType] = None) -> List[Dict]:
+        """Fetch account cash flow entries, chunked into 90-day windows."""
+        return self._chunked_fetch(
+            start, end,
+            lambda s, e: self._fetch_cashflow_chunk(s, e, business_type),
+            label='cash flow entries',
+            delay=0.3,
+        )
+
+    def _fetch_cashflow_chunk(self, start: datetime, end: datetime,
+                              business_type: Optional[BalanceType]) -> List[Dict]:
+        """Fetch one chunk of cash flow, handling pagination."""
+        entries: List[Dict] = []
+        page = 1
+        while True:
+            result = self.ctx.cash_flow(
+                start_at=start,
+                end_at=end,
+                business_type=business_type,
+                page=page,
+                size=1000,
+            )
+            if not result:
+                break
+            for entry in result:
+                parsed = self._parse_cashflow(entry)
+                if parsed:
+                    entries.append(parsed)
+            if len(result) < 1000:
+                break
+            page += 1
+            time.sleep(0.3)
+        return entries
+
+    @staticmethod
+    def _parse_cashflow(entry) -> Optional[Dict]:
+        """Parse a CashFlow SDK object to dict."""
+        try:
+            # The SDK's CashFlowDirection enum is not exported from the
+            # top-level `longport.openapi` namespace, so we can't do
+            # isinstance checks.  Inspecting the class name is the most
+            # reliable workaround.
+            direction_name = type(entry.direction).__name__
+            if direction_name == 'In':
+                direction = 'IN'
+            elif direction_name == 'Out':
+                direction = 'OUT'
+            else:
+                direction = 'UNKNOWN'
+
+            ts = entry.business_time
+            if hasattr(ts, 'isoformat'):
+                business_time = ts.isoformat()
+            elif isinstance(ts, (int, float)):
+                business_time = datetime.fromtimestamp(ts).isoformat()
+            else:
+                business_time = str(ts)
+
+            return {
+                'transaction_flow_name': str(entry.transaction_flow_name),
+                'direction': direction,
+                'balance': float(entry.balance),
+                'currency': str(entry.currency),
+                'business_time': business_time,
+                'symbol': str(entry.symbol) if entry.symbol else None,
+                'description': str(entry.description) if entry.description else '',
+            }
+        except Exception as e:
+            print(f"  Error parsing cash flow entry: {e}")
+            return None
+
