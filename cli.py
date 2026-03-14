@@ -96,6 +96,19 @@ def import_data(year, since, clear):
 def calculate(year, export):
     """Calculate capital gains tax."""
     db = DatabaseManager(Config.DATABASE_PATH)
+
+    # Warn if commission fees haven't been fetched yet
+    missing = db.get_orders_missing_fees(year)
+    if missing:
+        symbols = sorted(set(o['symbol'] for o in missing))
+        click.echo(
+            f"⚠️  {len(missing)} order(s) are missing commission fee data "
+            f"({', '.join(symbols)})"
+        )
+        click.echo(f"   Run: python cli.py update-fees --year {year}")
+        if not click.confirm("   Continue calculation without full fee data?"):
+            return
+
     exchange = ExchangeRateManager(db)
     settlement = SettlementCalculator(exchange)
     calc = TaxCalculator(db, settlement, Config.CAPITAL_GAINS_TAX_RATE)
