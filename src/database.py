@@ -40,11 +40,31 @@ class DatabaseManager:
                     PRIMARY KEY (date, from_currency, to_currency)
                 )
             ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS dividends (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    withholding REAL NOT NULL DEFAULT 0,
+                    received_at TEXT NOT NULL,
+                    flow_name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(symbol, received_at, amount)
+                )
+            ''')
             # Migrate: add source column if missing (existing databases)
             cursor = conn.execute("PRAGMA table_info(exchange_rates)")
             columns = [row[1] for row in cursor.fetchall()]
             if 'source' not in columns:
                 conn.execute("ALTER TABLE exchange_rates ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'")
+
+            # Migrate: add withholding column to dividends if missing
+            cursor = conn.execute("PRAGMA table_info(dividends)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if columns and 'withholding' not in columns:
+                conn.execute("ALTER TABLE dividends ADD COLUMN withholding REAL NOT NULL DEFAULT 0")
 
     def save_orders(self, orders: List[Dict]):
         """Save trading orders to database (batch insert)."""
@@ -151,6 +171,30 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             return conn.execute(query, params).fetchone()[0]
 
+
+    def save_dividends(self, dividends: List[Dict]):
+        """Save dividend records (skip duplicates)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany('''
+                INSERT OR IGNORE INTO dividends
+                (symbol, currency, amount, withholding, received_at, flow_name, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', [
+                (d['symbol'], d['currency'], d['amount'], d.get('withholding', 0),
+                 d['received_at'], d['flow_name'], d.get('description', ''))
+                for d in dividends
+            ])
+
+    def get_dividends(self, year: int) -> List[Dict]:
+        """Get all dividend records for a year."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT * FROM dividends
+                WHERE strftime('%Y', received_at) = ?
+                ORDER BY received_at
+            ''', (str(year),))
+            return [dict(row) for row in cursor.fetchall()]
 
     @staticmethod
     def _row_to_order(row: sqlite3.Row) -> Dict:
