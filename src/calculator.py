@@ -7,7 +7,6 @@ It delegates to SettlementCalculator and CostPool, then assembles the tax report
 from typing import Dict
 from datetime import datetime
 from pathlib import Path
-import pandas as pd
 from .database import DatabaseManager
 from .settlement import SettlementCalculator
 from .cost_pool import CostPool
@@ -104,37 +103,67 @@ class TaxCalculator:
         }
 
     def export_csv(self, results: Dict, output_dir: Path) -> Path:
-        """Export results to CSV files."""
+        """Export combined tax report to a single CSV file.
+
+        Layout:
+          1. Transaction details (each sell/close)
+          2. Blank separator
+          3. Per-symbol summary
+          4. Blank separator
+          5. Totals including net gains and tax owed
+        """
+        import csv
+
         output_dir.mkdir(exist_ok=True)
         year = results['year']
+        report_path = output_dir / f'tax_report_{year}.csv'
 
-        if results['details']:
-            df = pd.DataFrame(results['details'])
-            detail_path = output_dir / f'tax_detail_{year}.csv'
-            df.to_csv(detail_path, index=False, encoding='utf-8-sig')
-            print(f"Exported: {detail_path}")
+        with open(report_path, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f)
 
-        summary_data = []
-        for sym, s in results['summary'].items():
-            summary_data.append({
-                'Symbol': sym,
-                'Gains (CNY)': s['gains'],
-                'Losses (CNY)': s['losses'],
-                'Remaining Qty': s['remaining_qty'],
-                'Remaining Cost (CNY)': s['remaining_cost'],
-            })
-        summary_data.append({
-            'Symbol': 'TOTAL',
-            'Gains (CNY)': results['total_gains'],
-            'Losses (CNY)': results['total_losses'],
-            'Remaining Qty': '',
-            'Remaining Cost (CNY)': '',
-        })
+            # --- Section 1: Transaction Details ---
+            detail_cols = [
+                'order_id', 'symbol', 'date', 'quantity', 'price',
+                'currency', 'rate', 'proceeds_cny', 'cost_basis_cny',
+                'gain_loss', 'tax',
+            ]
+            writer.writerow(['[ Transaction Details ]'])
+            writer.writerow(detail_cols)
+            for tx in results['details']:
+                writer.writerow([tx[c] for c in detail_cols])
 
-        summary_path = output_dir / f'tax_summary_{year}.csv'
-        pd.DataFrame(summary_data).to_csv(summary_path, index=False, encoding='utf-8-sig')
-        print(f"Exported: {summary_path}")
-        return summary_path
+            # --- Separator ---
+            writer.writerow([])
+
+            # --- Section 2: Per-Symbol Summary ---
+            summary_cols = [
+                'Symbol', 'Gains (CNY)', 'Losses (CNY)',
+                'Net (CNY)', 'Remaining Qty', 'Remaining Cost (CNY)',
+            ]
+            writer.writerow(['[ Per-Symbol Summary ]'])
+            writer.writerow(summary_cols)
+            for sym, s in results['summary'].items():
+                writer.writerow([
+                    sym, f"{s['gains']:.2f}", f"{s['losses']:.2f}",
+                    f"{s['gains'] - s['losses']:.2f}",
+                    s['remaining_qty'], f"{s['remaining_cost']:.2f}",
+                ])
+
+            # --- Separator ---
+            writer.writerow([])
+
+            # --- Section 3: Totals ---
+            writer.writerow(['[ Totals ]'])
+            writer.writerow(['Item', 'Amount (CNY)'])
+            writer.writerow(['Total Gains', f"{results['total_gains']:.2f}"])
+            writer.writerow(['Total Losses', f"{results['total_losses']:.2f}"])
+            writer.writerow(['Net Gains', f"{results['net_gains']:.2f}"])
+            tax_pct = f"{self.tax_rate * 100:.0f}%"
+            writer.writerow([f'Tax Rate', tax_pct])
+            writer.writerow(['Tax Owed', f"{results['total_tax']:.2f}"])
+
+        print(f"Exported: {report_path}")
+        return report_path
 
     @staticmethod
     def _empty_result(year: int) -> Dict:
