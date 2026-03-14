@@ -1,98 +1,184 @@
-"""Exchange rate fetching and caching module."""
+"""Exchange rate fetching and caching module.
+
+Architecture:
+  RateProvider  — knows how to fetch rates from one external source.
+  ExchangeRateManager — orchestrates cache, providers, and fallback logic.
+"""
+
+from abc import ABC, abstractmethod
+from enum import StrEnum
+from typing import Dict, Optional
 
 import requests
-from datetime import datetime, timedelta
-from typing import Optional
+
 from .database import DatabaseManager
 
-class ExchangeRateManager:
-    """Manages exchange rate fetching and caching."""
-    
-    # 2024 average rates for CNY (fallback values)
-    CNY_RATES = {
-        'USD': 7.2,
-        'HKD': 0.92,
-        'SGD': 5.35,
-        'EUR': 7.8,
-        'GBP': 9.1,
-    }
-    
-    def __init__(self, db_manager: DatabaseManager):
-        self.db = db_manager
-    
-    def get_rate(self, date: str, from_currency: str, to_currency: str = "CNY") -> float:
-        """
-        Get exchange rate for a specific date.
-        Returns cached rate, fetches from API, or uses fallback.
-        """
-        # Check cache first
-        cached = self.db.get_exchange_rate(date, from_currency, to_currency)
-        if cached:
-            return cached
-        
-        # Try to fetch from API
-        rate = self._fetch_rate(date, from_currency, to_currency)
-        
-        if not rate:
-            # Try nearby dates
-            rate = self._get_nearby_rate(date, from_currency, to_currency)
-        
-        if not rate:
-            # Use fallback
-            rate = self._get_fallback_rate(from_currency, to_currency)
-            if rate:
-                print(f"  Using fallback rate {rate} for {from_currency}/{to_currency}")
-        
-        # Cache the rate
-        if rate:
-            self.db.save_exchange_rate(date, from_currency, to_currency, rate)
-        
-        return rate or 1.0
-    
-    def _fetch_rate(self, date: str, from_currency: str, to_currency: str) -> Optional[float]:
-        """Fetch rate from external API."""
-        # Try frankfurter.app (free, no API key)
+
+class RateSource(StrEnum):
+    """Where the rate data actually came from."""
+    FRANKFURTER = 'frankfurter'
+    FALLBACK = 'fallback'
+
+
+# ---------------------------------------------------------------------------
+# Provider interface + implementations
+# ---------------------------------------------------------------------------
+
+class RateProvider(ABC):
+    """Fetches exchange rates from a single external source."""
+
+    @property
+    @abstractmethod
+    def source(self) -> RateSource:
+        """Identifier stored in DB alongside the rate."""
+
+    @abstractmethod
+    def fetch(self, date: str, from_ccy: str, to_ccy: str) -> Optional[float]:
+        """Return the rate for *date*, or None on miss."""
+
+    @abstractmethod
+    def fetch_series(self, start: str, end: str,
+                     from_ccy: str, to_ccy: str) -> Optional[Dict[str, float]]:
+        """Return {date: rate} for the range, or None on failure."""
+
+
+class FrankfurterProvider(RateProvider):
+    """ECB rates via frankfurter.dev (free, no key required)."""
+
+    BASE_URL = 'https://api.frankfurter.dev/v1'
+
+    @property
+    def source(self) -> RateSource:
+        return RateSource.FRANKFURTER
+
+    def fetch(self, date: str, from_ccy: str, to_ccy: str) -> Optional[float]:
         try:
-            url = f"https://api.frankfurter.app/{date}?from={from_currency}&to={to_currency}"
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(
+                f"{self.BASE_URL}/{date}",
+                params={'from': from_ccy, 'to': to_ccy},
+                timeout=10,
+            )
             if resp.status_code == 200:
-                data = resp.json()
-                if 'rates' in data and to_currency in data['rates']:
-                    return data['rates'][to_currency]
+                return resp.json().get('rates', {}).get(to_ccy)
         except Exception:
             pass
-        
-        # For CNY, use calculated rates (most free APIs don't support CNY well)
-        if to_currency == 'CNY' and from_currency in self.CNY_RATES:
-            return self.CNY_RATES[from_currency]
-        
         return None
-    
-    def _get_nearby_rate(self, date: str, from_currency: str, to_currency: str) -> Optional[float]:
-        """Get rate from nearby cached dates."""
-        target = datetime.strptime(date, '%Y-%m-%d')
-        
-        for offset in range(1, 8):
-            for direction in [-1, 1]:
-                check_date = (target + timedelta(days=offset * direction)).strftime('%Y-%m-%d')
-                rate = self.db.get_exchange_rate(check_date, from_currency, to_currency)
-                if rate:
-                    return rate
+
+    def fetch_series(self, start: str, end: str,
+                     from_ccy: str, to_ccy: str) -> Optional[Dict[str, float]]:
+        try:
+            resp = requests.get(
+                f"{self.BASE_URL}/{start}..{end}",
+                params={'from': from_ccy, 'to': to_ccy},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return {
+                    d: day[to_ccy]
+                    for d, day in resp.json().get('rates', {}).items()
+                    if to_ccy in day
+                }
+        except Exception as e:
+            print(f"  Time series request failed: {e}")
         return None
-    
-    def _get_fallback_rate(self, from_currency: str, to_currency: str) -> Optional[float]:
-        """Get fallback rate for common pairs."""
-        if to_currency == 'CNY':
-            return self.CNY_RATES.get(from_currency)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+class ExchangeRateManager:
+    """Resolves exchange rates: cache → provider → nearby → fallback."""
+
+    # Last-resort hardcoded rates (rough 2024 averages).
+    _FALLBACK_CNY = {
+        'USD': 7.2, 'HKD': 0.92, 'SGD': 5.35, 'EUR': 7.8, 'GBP': 9.1,
+    }
+
+    def __init__(self, db: DatabaseManager,
+                 provider: RateProvider | None = None):
+        self.db = db
+        self.provider = provider or FrankfurterProvider()
+
+    # -- public API ----------------------------------------------------------
+
+    def get_rate(self, date: str, from_ccy: str, to_ccy: str = 'CNY') -> float:
+        """Return the exchange rate, resolving from cache/provider/fallback."""
+        cached = self.db.get_exchange_rate(date, from_ccy, to_ccy)
+        if cached:
+            return cached['rate']
+
+        rate, source = self._resolve(date, from_ccy, to_ccy)
+        if rate:
+            self.db.save_exchange_rate(date, from_ccy, to_ccy, rate, source)
+        return rate or 1.0
+
+    def batch_fetch(self, dates: list, from_ccy: str,
+                    to_ccy: str = 'CNY'):
+        """Fetch rates for multiple dates, preferring a single time-series call."""
+        if not dates:
+            return
+
+        uncached = [d for d in dates
+                    if not self.db.get_exchange_rate(d, from_ccy, to_ccy)]
+        if not uncached:
+            print(f"All {len(dates)} rates already cached ({from_ccy} → {to_ccy})")
+            return
+
+        print(f"Fetching {len(uncached)} exchange rates ({from_ccy} → {to_ccy})...")
+
+        series = self.provider.fetch_series(
+            min(uncached), max(uncached), from_ccy, to_ccy)
+
+        if series is not None:
+            self._save_series(uncached, series, from_ccy, to_ccy)
+        else:
+            print("  Time series unavailable, fetching per-date...")
+            for date in uncached:
+                self.get_rate(date, from_ccy, to_ccy)
+            print("  Done.")
+
+    # -- internals -----------------------------------------------------------
+
+    def _resolve(self, date: str, from_ccy: str,
+                 to_ccy: str) -> tuple[Optional[float], str]:
+        """Try provider → hardcoded fallback."""
+        rate = self.provider.fetch(date, from_ccy, to_ccy)
+        if rate:
+            return rate, self.provider.source
+
+        rate = self._fallback(from_ccy, to_ccy)
+        if rate:
+            print(f"  ⚠️  Using hardcoded fallback {rate} for "
+                  f"{from_ccy}/{to_ccy} on {date}")
+            return rate, RateSource.FALLBACK
+
+        return None, RateSource.FALLBACK
+
+    @classmethod
+    def _fallback(cls, from_ccy: str, to_ccy: str) -> Optional[float]:
+        if to_ccy == 'CNY':
+            return cls._FALLBACK_CNY.get(from_ccy)
         return None
-    
-    def batch_fetch(self, dates: list, from_currency: str, to_currency: str = "CNY"):
-        """Batch fetch exchange rates for multiple dates."""
-        print(f"Fetching exchange rates for {len(dates)} dates ({from_currency} -> {to_currency})...")
-        
-        for i, date in enumerate(dates):
-            if i > 0 and i % 10 == 0:
-                print(f"  Progress: {i}/{len(dates)}")
-            self.get_rate(date, from_currency, to_currency)
-        
-        print(f"  Done.")
+
+    def _save_series(self, uncached: list, series: dict,
+                     from_ccy: str, to_ccy: str):
+        sorted_series_dates = sorted(series.keys())
+        saved = 0
+        for date in uncached:
+            rate = series.get(date) or self._nearest_before(date, sorted_series_dates, series)
+            if rate:
+                self.db.save_exchange_rate(
+                    date, from_ccy, to_ccy, rate, self.provider.source)
+                saved += 1
+            else:
+                print(f"  ⚠️  No rate available for {date} — skipped")
+        print(f"  Done — saved {saved}/{len(uncached)} rates")
+
+    @staticmethod
+    def _nearest_before(date: str, sorted_dates: list, series: dict) -> Optional[float]:
+        """Find the most recent rate on or before *date* from the series."""
+        for d in reversed(sorted_dates):
+            if d <= date:
+                return series[d]
+        return None

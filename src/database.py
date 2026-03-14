@@ -35,10 +35,16 @@ class DatabaseManager:
                     from_currency TEXT NOT NULL,
                     to_currency TEXT NOT NULL,
                     rate REAL NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'unknown',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (date, from_currency, to_currency)
                 )
             ''')
+            # Migrate: add source column if missing (existing databases)
+            cursor = conn.execute("PRAGMA table_info(exchange_rates)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'source' not in columns:
+                conn.execute("ALTER TABLE exchange_rates ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'")
 
     def save_orders(self, orders: List[Dict]):
         """Save trading orders to database (batch insert)."""
@@ -81,24 +87,26 @@ class DatabaseManager:
 
             return [self._row_to_order(row) for row in cursor.fetchall()]
 
-    def save_exchange_rate(self, date: str, from_currency: str, to_currency: str, rate: float):
+    def save_exchange_rate(self, date: str, from_currency: str, to_currency: str,
+                          rate: float, source: str = 'unknown'):
         """Save exchange rate to database."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO exchange_rates
-                (date, from_currency, to_currency, rate)
-                VALUES (?, ?, ?, ?)
-            ''', (date, from_currency, to_currency, rate))
+                (date, from_currency, to_currency, rate, source)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (date, from_currency, to_currency, rate, source))
 
-    def get_exchange_rate(self, date: str, from_currency: str, to_currency: str) -> Optional[float]:
-        """Get exchange rate from database."""
+    def get_exchange_rate(self, date: str, from_currency: str,
+                          to_currency: str) -> Optional[Dict]:
+        """Get exchange rate from database. Returns dict with 'rate' and 'source', or None."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute('''
-                SELECT rate FROM exchange_rates
+                SELECT rate, source FROM exchange_rates
                 WHERE date = ? AND from_currency = ? AND to_currency = ?
             ''', (date, from_currency, to_currency))
             result = cursor.fetchone()
-            return result[0] if result else None
+            return {'rate': result[0], 'source': result[1]} if result else None
 
     def clear_year_data(self, year: int):
         """Clear all data for a specific year."""
@@ -132,6 +140,16 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def get_fallback_rate_count(self, year: int = None) -> int:
+        """Count exchange rates that used fallback (hardcoded) source."""
+        query = "SELECT COUNT(*) FROM exchange_rates WHERE source = 'fallback'"
+        params = []
+        if year:
+            query += " AND strftime('%Y', date) = ?"
+            params.append(str(year))
+        with sqlite3.connect(self.db_path) as conn:
+            return conn.execute(query, params).fetchone()[0]
 
 
     @staticmethod

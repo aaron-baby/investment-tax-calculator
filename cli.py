@@ -109,6 +109,16 @@ def calculate(year, export):
         if not click.confirm("   Continue calculation without full fee data?"):
             return
 
+    # Warn if any exchange rates used hardcoded fallback
+    fallback_count = db.get_fallback_rate_count(year)
+    if fallback_count:
+        click.echo(
+            f"⚠️  {fallback_count} exchange rate(s) are using hardcoded fallback values"
+        )
+        click.echo("   Run: python cli.py import-data to re-fetch from API")
+        if not click.confirm("   Continue with fallback rates?"):
+            return
+
     exchange = ExchangeRateManager(db)
     settlement = SettlementCalculator(exchange)
     calc = TaxCalculator(db, settlement, Config.CAPITAL_GAINS_TAX_RATE)
