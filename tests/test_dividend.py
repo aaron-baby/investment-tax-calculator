@@ -68,7 +68,7 @@ class TestDividendStorage:
 
 class TestDividendCalculation:
     def test_us_dividend_with_withholding(self, db, calc):
-        """US stock: net $44, withheld $4.40 → gross $48.40."""
+        """US stock: amount=$44 is gross, withheld=$4.40, net=$39.60."""
         _seed_rate(db, '2025-01-16', 'USD', 7.2)
         db.save_dividends([{
             'symbol': 'OXY.US', 'currency': 'USD', 'amount': 44.0,
@@ -78,14 +78,15 @@ class TestDividendCalculation:
         result = calc.calculate(2025)
         d = result['details'][0]
 
-        assert d['net_amount'] == 44.0
-        assert d['gross_amount'] == pytest.approx(48.4)
+        # amount IS gross; net = gross - withheld
+        assert d['gross_amount'] == pytest.approx(44.0)
         assert d['withheld'] == pytest.approx(4.4)
-        assert d['gross_cny'] == pytest.approx(48.4 * 7.2)
+        assert d['net_amount'] == pytest.approx(39.6)
+        assert d['gross_cny'] == pytest.approx(44.0 * 7.2)
         assert d['withheld_cny'] == pytest.approx(4.4 * 7.2)
 
         # China tax = gross_cny * 20%, credit = withheld_cny, owed = diff
-        china_tax = 48.4 * 7.2 * 0.20
+        china_tax = 44.0 * 7.2 * 0.20
         credit = 4.4 * 7.2
         assert result['total_china_tax'] == pytest.approx(china_tax)
         assert result['total_credit'] == pytest.approx(credit)
@@ -127,9 +128,9 @@ class TestDividendCalculation:
     def test_credit_capped_at_china_tax(self, db, calc):
         """If withholding exceeds 20% of gross, credit is capped."""
         _seed_rate(db, '2025-01-01', 'USD', 7.2)
-        # Extreme case: withholding > 20% of gross
-        # gross = 10 + 5 = 15, china_tax = 15 * 7.2 * 0.2 = 21.6
-        # withheld_cny = 5 * 7.2 = 36 > 21.6 → credit capped at 21.6
+        # amount=10 IS gross, withholding=5 (50% rate, way above 20%)
+        # china_tax = 10 * 7.2 * 0.2 = 14.4
+        # withheld_cny = 5 * 7.2 = 36 > 14.4 → credit capped at 14.4
         db.save_dividends([{
             'symbol': 'X.US', 'currency': 'USD', 'amount': 10.0,
             'withholding': 5.0,

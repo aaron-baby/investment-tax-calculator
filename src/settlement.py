@@ -10,7 +10,13 @@ from typing import Dict
 from .exchange_rate import ExchangeRateManager
 
 # US equity options: TICKER + YYMMDD + C/P + strike price + .US
-_OPTION_PATTERN = re.compile(r'^.+\d{6}[CP]\d+\.US$')
+# Capture group 1 = YYMMDD expiry date.
+_OPTION_PATTERN = re.compile(r'^.+?(\d{6})[CP]\d+\.US$')
+
+
+def is_option(symbol: str) -> bool:
+    """Check if a symbol is a US equity option."""
+    return _OPTION_PATTERN.match(symbol) is not None
 
 
 def get_multiplier(symbol: str) -> int:
@@ -19,9 +25,26 @@ def get_multiplier(symbol: str) -> int:
     US equity options: 1 contract = 100 shares → multiplier = 100
     Everything else (stocks, ETFs, HK stocks): multiplier = 1
     """
-    if _OPTION_PATTERN.match(symbol):
+    if is_option(symbol):
         return 100
     return 1
+
+
+def parse_option_expiry(symbol: str) -> datetime | None:
+    """Extract expiry date from a US option symbol.
+
+    Symbol format: TICKER + YYMMDD + C/P + STRIKE + .US
+    Example: AAPL250620P200000.US → 2025-06-20
+
+    Returns None for non-option symbols.
+    """
+    m = _OPTION_PATTERN.match(symbol)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), '%y%m%d')
+    except ValueError:
+        return None
 
 
 class SettlementCalculator:

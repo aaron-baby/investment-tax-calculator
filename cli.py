@@ -15,6 +15,7 @@ from src.settlement import SettlementCalculator
 from src.calculator import TaxCalculator
 from src.dividend import DividendCalculator
 from src.cashflow_parser import parse_dividends, summarize_by_symbol
+from src.report import export_csv
 
 # Initialize directories
 Config.init_dirs()
@@ -178,7 +179,7 @@ def calculate(year, export):
     click.echo(f"{'='*60}")
 
     if export:
-        calc.export_csv(results, Config.OUTPUT_DIR, div_results)
+        export_csv(results, Config.OUTPUT_DIR, Config.CAPITAL_GAINS_TAX_RATE, div_results)
 
 @cli.command()
 @click.option('--year', type=int, default=None, help='Only update fees for orders in this year')

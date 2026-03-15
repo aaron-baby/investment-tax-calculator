@@ -80,12 +80,36 @@ class TestShortPosition:
         assert pool.quantity == 0
 
     def test_expired_worthless_short(self):
-        """SPY put sold, expires worthless — no buy-to-close, full profit."""
+        """SPY put sold, expires worthless — close at zero cost, full profit."""
         pool = CostPool("SPY250402P535000.US")
         pool.sell(2, settled_amount=43.8)  # 2 * 0.03 * 100 * 7.3
         assert pool.quantity == -2
         assert pool.total_cost == pytest.approx(43.8)
-        # Position stays open — profit realized when/if closed or at expiry
+
+        # Simulate expiry: buy back at zero cost
+        locked_proceeds = pool.buy(2, 0)
+        assert locked_proceeds == pytest.approx(43.8)
+        assert pool.quantity == 0
+
+    def test_sell3_buy2_expire1(self):
+        """Sell 3 puts, buy back 2, 1 expires worthless."""
+        pool = CostPool("AAPL250620P200000.US")
+
+        # Sell to open 3 puts, total proceeds = 3 * 5.0 * 100 * 7.2 = 10800 CNY
+        cost_basis = pool.sell(3, settled_amount=10800)
+        assert cost_basis == 0
+        assert pool.quantity == -3
+        assert pool.avg_cost == pytest.approx(3600)  # per contract
+
+        # Buy to close 2 puts, cost = 2 * 2.0 * 100 * 7.2 = 2880 CNY
+        locked = pool.buy(2, 2880)
+        assert locked == pytest.approx(7200)  # 2 * 3600 proceeds locked at open
+        assert pool.quantity == -1
+
+        # 1 remaining expires worthless: buy at zero
+        locked2 = pool.buy(1, 0)
+        assert locked2 == pytest.approx(3600)
+        assert pool.quantity == 0
 
     def test_sell_to_open_requires_amount(self):
         pool = CostPool("TEST")

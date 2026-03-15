@@ -6,12 +6,12 @@ Tax rules for Chinese tax residents:
     but credit cannot exceed the China tax amount.
 
 Data source:
-  The `dividends` DB table stores net dividend received (`amount`) and
+  The `dividends` DB table stores the gross dividend (`amount`) and
   the actual foreign withholding tax (`withholding`), both in original
   currency.  These come from the Long Bridge Cash Flow API:
-    - "Cash Dividend" entries → amount
+    - "Cash Dividend" entries → amount (this IS the gross, pre-tax total)
     - "CO Other FEE" / Withholding Tax entries → withholding
-  Gross = amount + withholding.
+  Net received = amount - withholding.
 """
 
 from datetime import datetime
@@ -66,9 +66,9 @@ class DividendCalculator:
         date = datetime.fromisoformat(div['received_at']).strftime('%Y-%m-%d')
         symbol = div['symbol']
         currency = div['currency']
-        net_amount = div['amount']
-        withheld = div.get('withholding', 0.0)
-        gross = net_amount + withheld
+        gross = div['amount']              # balance from Cash Dividend = gross (pre-tax)
+        withheld = div.get('withholding', 0.0)  # foreign tax already deducted
+        net_amount = gross - withheld
 
         rate = self.exchange.get_rate(date, currency, 'CNY')
 

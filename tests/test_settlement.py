@@ -1,8 +1,9 @@
-"""Unit tests for SettlementCalculator and get_multiplier."""
+"""Unit tests for SettlementCalculator, get_multiplier, and parse_option_expiry."""
 
 import pytest
+from datetime import datetime
 from unittest.mock import MagicMock
-from src.settlement import SettlementCalculator, get_multiplier
+from src.settlement import SettlementCalculator, get_multiplier, is_option, parse_option_expiry
 
 
 # --- get_multiplier tests ---
@@ -30,6 +31,24 @@ class TestGetMultiplier:
     def test_leveraged_etf_not_option(self):
         assert get_multiplier('AMDL.US') == 1
         assert get_multiplier('SOXL.US') == 1
+
+
+class TestParseOptionExpiry:
+    def test_us_put(self):
+        assert parse_option_expiry('SPY250402P535000.US') == datetime(2025, 4, 2)
+
+    def test_us_call(self):
+        assert parse_option_expiry('AAPL260116C210000.US') == datetime(2026, 1, 16)
+
+    def test_stock_returns_none(self):
+        assert parse_option_expiry('AAPL.US') is None
+
+    def test_hk_stock_returns_none(self):
+        assert parse_option_expiry('1378.HK') is None
+
+    def test_is_option(self):
+        assert is_option('NVDA251219P100000.US') is True
+        assert is_option('SPY.US') is False
 
 
 # --- SettlementCalculator tests ---
