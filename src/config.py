@@ -24,7 +24,7 @@ class Config:
     
     # Tax calculation settings
     CAPITAL_GAINS_TAX_RATE = 0.20  # 20% for Chinese residents
-    DEFAULT_TAX_YEAR = 2024
+    DEFAULT_TAX_YEAR = 2025
     
     @classmethod
     def init_dirs(cls):

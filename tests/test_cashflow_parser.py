@@ -6,13 +6,16 @@ from src.cashflow_parser import (
     summarize_by_symbol,
     _extract_symbol,
     _is_withholding,
+    _parse_embedded_wht,
 )
 
 
 def _entry(name, balance, currency='USD', symbol=None, desc='',
-           business_time='2025-01-16T00:00:00'):
+           business_time='2025-01-16T00:00:00', direction='IN'):
+    """Build a raw cash flow entry matching the API/DB schema."""
     return {
         'transaction_flow_name': name,
+        'direction': direction,
         'balance': balance,
         'currency': currency,
         'symbol': symbol,
@@ -47,6 +50,21 @@ class TestIsWithholding:
 
     def test_not_withholding(self):
         assert not _is_withholding('Cash Dividend: 0.22 USD per Share')
+
+
+class TestParseEmbeddedWht:
+    def test_hk_h_share_10pct(self):
+        desc = '#1919.HK COSCO SHIP HOLD: 25 I/D-RMB0.56/SH(-10%), PAY IN APPROX. HKD0.5525495999/SH(NET)'
+        assert _parse_embedded_wht(desc) == pytest.approx(0.10)
+
+    def test_hk_h_share_20pct(self):
+        assert _parse_embedded_wht('HKD1.00/SH(-20%), PAY IN HKD0.80(NET)') == pytest.approx(0.20)
+
+    def test_no_embedded_rate(self):
+        assert _parse_embedded_wht('OXY.US Cash Dividend: 0.22 USD per Share') is None
+
+    def test_non_h_share_hk(self):
+        assert _parse_embedded_wht('#9988.HK BABA-W: 24/25 F/D-USD0.13125/SH') is None
 
 
 class TestParseDividends:
@@ -91,13 +109,24 @@ class TestParseDividends:
         divs, _ = parse_dividends(entries)
         assert len(divs) == 0
 
+    def test_h_share_back_calculates_gross(self):
+        """H-share with (-10%): balance is NET, parser should reconstruct gross."""
+        entries = [
+            _entry('Cash Dividend', 2970.0, currency='HKD',
+                   desc='#883.HK CNOOC: 24 F/D-HKD0.66/SH(-10%), PAY IN HKD0.594(NET)'),
+        ]
+        divs, _ = parse_dividends(entries)
+        assert len(divs) == 1
+        assert divs[0]['amount'] == pytest.approx(3300.0)       # gross
+        assert divs[0]['withholding'] == pytest.approx(330.0)   # 10% of gross
+
 
 class TestSummarizeBySymbol:
     def test_aggregation(self):
         divs = [
-            {'symbol': 'A.US', 'amount': 10.0},
-            {'symbol': 'B.US', 'amount': 20.0},
-            {'symbol': 'A.US', 'amount': 5.0},
+            {'symbol': 'A.US', 'amount': 10.0, 'withholding': 1.0},
+            {'symbol': 'B.US', 'amount': 20.0, 'withholding': 2.0},
+            {'symbol': 'A.US', 'amount': 5.0, 'withholding': 0.5},
         ]
         result = summarize_by_symbol(divs)
-        assert result == {'A.US': 15.0, 'B.US': 20.0}
+        assert result == {'A.US': 13.5, 'B.US': 18.0}

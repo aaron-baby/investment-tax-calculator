@@ -5,13 +5,10 @@ Tax rules for Chinese tax residents:
   - Foreign withholding tax can be credited against China tax liability,
     but credit cannot exceed the China tax amount.
 
-Data source:
-  The `dividends` DB table stores net dividend received (`amount`) and
-  the actual foreign withholding tax (`withholding`), both in original
-  currency.  These come from the Long Bridge Cash Flow API:
-    - "Cash Dividend" entries → amount
-    - "CO Other FEE" / Withholding Tax entries → withholding
-  Gross = amount + withholding.
+Data flow:
+  cashflows table (raw API cache)
+    → cashflow_parser.parse_dividends() (match withholding, H-share gross reconstruction)
+    → DividendCalculator (CNY conversion, tax credit calculation)
 """
 
 from datetime import datetime
@@ -19,6 +16,10 @@ from typing import Dict, List
 
 from .database import DatabaseManager
 from .exchange_rate import ExchangeRateManager
+from .cashflow_parser import parse_dividends
+
+# Cash flow types that are dividend-related.
+_DIVIDEND_FLOW_NAMES = ['Cash Dividend', 'CO Other FEE']
 
 CHINA_DIVIDEND_TAX_RATE = 0.20
 
@@ -33,9 +34,11 @@ class DividendCalculator:
     def calculate(self, year: int) -> Dict:
         """Calculate dividend tax for a year.
 
-        Returns dict with details list and aggregated totals.
+        Reads raw cash flows from DB, parses into dividends, then
+        computes tax with foreign tax credit.
         """
-        dividends = self.db.get_dividends(year)
+        raw_entries = self.db.get_cashflows(year, _DIVIDEND_FLOW_NAMES)
+        dividends, _ = parse_dividends(raw_entries)
 
         details = []
         total_gross_cny = 0.0
@@ -62,13 +65,13 @@ class DividendCalculator:
         }
 
     def _process(self, div: Dict) -> Dict:
-        """Convert one dividend record to a tax detail line."""
+        """Convert one parsed dividend record to a tax detail line."""
         date = datetime.fromisoformat(div['received_at']).strftime('%Y-%m-%d')
         symbol = div['symbol']
         currency = div['currency']
-        net_amount = div['amount']
+        gross = div['amount']              # already normalized to gross by parser
         withheld = div.get('withholding', 0.0)
-        gross = net_amount + withheld
+        net_amount = gross - withheld
 
         rate = self.exchange.get_rate(date, currency, 'CNY')
 

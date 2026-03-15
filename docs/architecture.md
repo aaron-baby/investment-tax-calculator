@@ -12,7 +12,8 @@ cli.py                           (user interaction, command orchestration)
   │     └── CostPool             (weighted avg cost, long + short, zero dependencies)
   ├── DividendCalculator         (dividend income tax with foreign tax credit)
   │     └── ExchangeRate         (shared)
-  └── DatabaseManager            (SQLite CRUD: orders, exchange_rates, dividends)
+  ├── ReportExporter             (CSV output: transactions, dividends, tax summary)
+  └── DatabaseManager            (SQLite CRUD: orders, exchange_rates, cashflows)
 ```
 
 ## Module Responsibilities
@@ -21,12 +22,13 @@ cli.py                           (user interaction, command orchestration)
 |---|---|---|
 | `cost_pool.py` | Weighted avg cost math, long & short positions | Know about currencies, rates, fees, DB |
 | `settlement.py` | CNY conversion: `(qty × price × multiplier ± fees) × rate` | Know about cost pools or tax |
-| `calculator.py` | Replay full history through pool, collect year's taxable events, CSV export | Compute rates, fees, or cost math |
-| `dividend.py` | Dividend income tax: gross reconstruction, foreign tax credit, CNY conversion | Parse cash flow entries or fetch data |
-| `cashflow_parser.py` | Parse cash flow into dividend records, match withholding by timestamp | DB access, API calls, tax calculation |
-| `database.py` | SQLite read/write for orders, exchange rates, dividends | Business logic |
+| `calculator.py` | Replay full history through pool, collect year's taxable events | Compute rates, fees, cost math, or report formatting |
+| `dividend.py` | Dividend income tax: reads raw cashflows → parser → CNY conversion, foreign tax credit | Parse cash flow entries or fetch data |
+| `cashflow_parser.py` | Parse raw cash flow into dividend records, match withholding by timestamp, H-share gross reconstruction | DB access, API calls, tax calculation |
+| `database.py` | SQLite read/write for orders, exchange rates, cashflows (raw cache) | Business logic |
 | `exchange_rate.py` | Rate fetch (provider API + DB cache + fallback), batch time-series | Anything else |
 | `longbridge_client.py` | Long Bridge API calls (orders, order detail, cash flow) | Data storage or calculation |
+| `report.py` | CSV export: transaction details, per-symbol summary, dividend tax | Business logic or calculation |
 | `config.py` | Env vars, paths, tax rate constants | Logic |
 
 ## Database Tables
@@ -35,7 +37,7 @@ cli.py                           (user interaction, command orchestration)
 |---|---|---|
 | `orders` | order_id (PK), symbol, side, quantity, price, currency, executed_at, fees_json | Trade history |
 | `exchange_rates` | (date, from_currency, to_currency) PK, rate, source | Cached FX rates |
-| `dividends` | id (auto), symbol, currency, amount, withholding, received_at | Dividend income records |
+| `cashflows` | id (auto), transaction_flow_name, direction, balance, currency, business_time, symbol, description | Raw API cash flow cache |
 
 ## Key Design Decisions
 
@@ -49,7 +51,7 @@ cli.py                           (user interaction, command orchestration)
 
 **Exchange rates**: `RateProvider` ABC with `FrankfurterProvider` implementation. `ExchangeRateManager` orchestrates DB cache → provider → nearest-before (for weekends) → hardcoded fallback. Batch fetch uses time-series API to minimize requests. Each rate records its `source` (e.g. `frankfurter`, `fallback`).
 
-**Dividend import decoupled from calculation**: `import-dividends` fetches cash flow from API and stores parsed dividend records (with matched withholding) in DB. `calculate` reads from DB and computes tax. No API calls during calculation.
+**Dividend import decoupled from calculation**: `import-dividends` fetches cash flow from API and stores raw entries in the `cashflows` table (DB as cache layer, mirrors API response). `calculate` reads raw cash flows, pipes them through `cashflow_parser` (withholding matching, H-share gross reconstruction), then computes tax. No processing at import time — logic changes take effect without re-importing.
 
 ## Dividend Tax Calculation
 
@@ -62,9 +64,11 @@ credit      = min(withheld_cny, china_tax)
 tax_owed    = china_tax - credit
 ```
 
-Withholding data comes from the actual cash flow (Long Bridge "CO Other FEE" entries), not estimated by market. This means:
-- US stocks: typically 10% withheld → 10% owed
-- HK H-shares: typically 10% withheld → 10% owed
-- HK non-H-shares: no withholding → 20% owed
+Withholding data comes from the actual cash flow entries:
+- US stocks: "CO Other FEE" with Withholding Tax description → matched by timestamp
+- HK H-shares: embedded in Cash Dividend description as `(-10%)`, balance is NET → parser back-calculates gross
+- HK non-H-shares (red chips, Cayman-registered like BABA-W): no withholding → full 20% owed
 - Scrip dividends (以股代息): not in cash flow, not taxed as dividend income
+
+Raw cash flow entries are stored as-is in the `cashflows` table (DB = cache layer). All processing (withholding matching, gross reconstruction) happens at read time in `cashflow_parser.py`.
 
