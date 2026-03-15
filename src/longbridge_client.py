@@ -237,15 +237,13 @@ class LongBridgeClient:
     def _parse_cashflow(entry) -> Optional[Dict]:
         """Parse a CashFlow SDK object to dict."""
         try:
-            # The SDK's CashFlowDirection enum is not exported from the
-            # top-level `longport.openapi` namespace, so we can't do
-            # isinstance checks.  Inspecting the class name is the most
-            # reliable workaround.
-            direction_name = type(entry.direction).__name__
-            if direction_name == 'In':
-                direction = 'IN'
-            elif direction_name == 'Out':
+            # SDK CashFlowDirection enum: 1 = outflow, 2 = inflow
+            # (per Long Bridge API docs).  Use int() for reliable matching.
+            direction_val = int(entry.direction)
+            if direction_val == 1:
                 direction = 'OUT'
+            elif direction_val == 2:
+                direction = 'IN'
             else:
                 direction = 'UNKNOWN'
 
@@ -257,9 +255,13 @@ class LongBridgeClient:
             else:
                 business_time = str(ts)
 
+            # SDK BalanceType enum: 1=cash, 2=stock, 3=fund
+            business_type = int(entry.business_type) if entry.business_type else None
+
             return {
                 'transaction_flow_name': str(entry.transaction_flow_name),
                 'direction': direction,
+                'business_type': business_type,
                 'balance': float(entry.balance),
                 'currency': str(entry.currency),
                 'business_time': business_time,

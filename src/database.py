@@ -40,18 +40,21 @@ class DatabaseManager:
                     PRIMARY KEY (date, from_currency, to_currency)
                 )
             ''')
+            # Raw cash flow entries — mirrors the API response as closely as
+            # possible so the DB acts as a cache layer, not a processing layer.
             conn.execute('''
-                CREATE TABLE IF NOT EXISTS dividends (
+                CREATE TABLE IF NOT EXISTS cashflows (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
+                    transaction_flow_name TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    business_type INTEGER,
+                    balance REAL NOT NULL,
                     currency TEXT NOT NULL,
-                    amount REAL NOT NULL,
-                    withholding REAL NOT NULL DEFAULT 0,
-                    received_at TEXT NOT NULL,
-                    flow_name TEXT NOT NULL,
+                    business_time TEXT NOT NULL,
+                    symbol TEXT,
                     description TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(symbol, received_at, amount)
+                    UNIQUE(transaction_flow_name, business_time, balance, currency)
                 )
             ''')
             # Migrate: add source column if missing (existing databases)
@@ -60,11 +63,11 @@ class DatabaseManager:
             if 'source' not in columns:
                 conn.execute("ALTER TABLE exchange_rates ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'")
 
-            # Migrate: add withholding column to dividends if missing
-            cursor = conn.execute("PRAGMA table_info(dividends)")
+            # Migrate: add business_type column to cashflows if missing
+            cursor = conn.execute("PRAGMA table_info(cashflows)")
             columns = [row[1] for row in cursor.fetchall()]
-            if columns and 'withholding' not in columns:
-                conn.execute("ALTER TABLE dividends ADD COLUMN withholding REAL NOT NULL DEFAULT 0")
+            if columns and 'business_type' not in columns:
+                conn.execute("ALTER TABLE cashflows ADD COLUMN business_type INTEGER")
 
     def save_orders(self, orders: List[Dict]):
         """Save trading orders to database (batch insert)."""
@@ -172,29 +175,40 @@ class DatabaseManager:
             return conn.execute(query, params).fetchone()[0]
 
 
-    def save_dividends(self, dividends: List[Dict]):
-        """Save dividend records (skip duplicates)."""
+    # -- Cash flow (raw API cache) -----------------------------------------
+
+    def save_cashflows(self, entries: List[Dict]):
+        """Save raw cash flow entries from API (skip duplicates)."""
         with sqlite3.connect(self.db_path) as conn:
             conn.executemany('''
-                INSERT OR IGNORE INTO dividends
-                (symbol, currency, amount, withholding, received_at, flow_name, description)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO cashflows
+                (transaction_flow_name, direction, business_type, balance,
+                 currency, business_time, symbol, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', [
-                (d['symbol'], d['currency'], d['amount'], d.get('withholding', 0),
-                 d['received_at'], d['flow_name'], d.get('description', ''))
-                for d in dividends
+                (e['transaction_flow_name'], e['direction'],
+                 e.get('business_type'), e['balance'], e['currency'],
+                 e['business_time'], e.get('symbol'), e.get('description', ''))
+                for e in entries
             ])
 
-    def get_dividends(self, year: int) -> List[Dict]:
-        """Get all dividend records for a year."""
+    def get_cashflows(self, year: int,
+                      flow_names: List[str] | None = None) -> List[Dict]:
+        """Get raw cash flow entries for a year, optionally filtered by flow name."""
+        query = '''
+            SELECT * FROM cashflows
+            WHERE strftime('%Y', business_time) = ?
+        '''
+        params: list = [str(year)]
+        if flow_names:
+            placeholders = ','.join('?' * len(flow_names))
+            query += f' AND transaction_flow_name IN ({placeholders})'
+            params.extend(flow_names)
+        query += ' ORDER BY business_time'
+
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute('''
-                SELECT * FROM dividends
-                WHERE strftime('%Y', received_at) = ?
-                ORDER BY received_at
-            ''', (str(year),))
-            return [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
 
     @staticmethod
     def _row_to_order(row: sqlite3.Row) -> Dict:

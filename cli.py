@@ -13,7 +13,7 @@ from src.exchange_rate import ExchangeRateManager
 from src.longbridge_client import LongBridgeClient
 from src.settlement import SettlementCalculator
 from src.calculator import TaxCalculator
-from src.dividend import DividendCalculator
+from src.dividend import DividendCalculator, _DIVIDEND_FLOW_NAMES
 from src.cashflow_parser import parse_dividends, summarize_by_symbol
 from src.report import export_csv
 
@@ -266,7 +266,15 @@ def import_dividends(year, since):
 
     entries = client.fetch_cashflow(start, end)
 
-    dividends, unmatched = parse_dividends(entries)
+    # Save ALL raw cash flow entries to DB as cache.
+    if entries:
+        db.save_cashflows(entries)
+        click.echo(f"✅ Cached {len(entries)} raw cash flow entries")
+
+    # Filter to dividend-related entries and parse for summary display.
+    div_entries = [e for e in entries
+                   if e['transaction_flow_name'] in _DIVIDEND_FLOW_NAMES]
+    dividends, unmatched = parse_dividends(div_entries)
 
     if not dividends:
         click.echo("⚠️  No dividend entries found in cash flow data")
@@ -275,8 +283,7 @@ def import_dividends(year, since):
             click.echo(f"   All flow names found: {', '.join(flow_names)}")
         return
 
-    db.save_dividends(dividends)
-    click.echo(f"✅ Imported {len(dividends)} dividend records")
+    click.echo(f"   {len(dividends)} dividend records parsed")
 
     total_wh = sum(d['withholding'] for d in dividends)
     if total_wh > 0:
